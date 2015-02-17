@@ -28,11 +28,15 @@ else
   mkdir $TMP_DIR
 fi
 
+# connect to a databasefile in sqlite format
+db.connect driver=sqlite database=${GIS_DB_FILE}
+
 # import the underlying raster map
 r.in.gdal -o --overwrite input=${HWSDDIR}/hwsd.bil output=${rastBasemap}
 
-# connect to a databsefile in sqlite format
-db.connect driver=sqlite database=${GIS_DB_FILE}
+# Convert raster to vector (area)
+r.to.vect --overwrite input=${rastBasemap} output=${vectBasemap} feature=area
+sqlite3 ${GIS_DB_FILE} "ALTER TABLE ${vectBasemap} ADD area REAL"
 
 # Create the tabledefinitions from the MS ACCESS file
 mdb-schema ${HWSDDIR}/HWSD.mdb mysql \
@@ -40,34 +44,30 @@ mdb-schema ${HWSDDIR}/HWSD.mdb mysql \
   | sed -e 's/`/"/g' \
   | sed -e 's/int/integer/'  \
   | sed -e 's/float/real/' > ${TMP_DIR}/HWSD_CREATE.sql
-sqlite3 ${GISDB} < ${TMP_DIR}/HWSD_CREATE.sql
+sqlite3 ${GIS_DB_FILE} < ${TMP_DIR}/HWSD_CREATE.sql
 
 # import all tables from the MS ACCESS file
 for table in `mdb-tables ${HWSDDIR}/HWSD.mdb`; do
   mdb-export -d '|' ${HWSDDIR}/HWSD.mdb $table \
     | sed -e '1d' \
     | sed -e 's/"//g' > ${TMP_DIR}/${table}.csv
-  cat << EOF | sqlite3 ${GISDB}
+  cat << EOF | sqlite3 ${GIS_DB_FILE}
 .separator "|"
 .import ${TMP_DIR}/${table}.csv  $table 
 .quit
 EOF
 done
 
-# Convert raster to vector (area)
-r.to.vect --overwrite input=${rastBasemap} output=${vectBasemap} feature=area
-sqlite3 ${GISDB} "ALTER TABLE ${vectBasemap} ADD area REAL"
-
-# and join attribute table
-newColNames=(`sqlite3 ${GISDB} '.schema HWSD_SMU' | sed -e '1,2d' | sed -e '$d' | sed -e 's/^\s*//' | sed -e 's/\s.*//'`)
-newColTypes=(`sqlite3 ${GISDB} '.schema HWSD_SMU' | sed -e '1,2d' | sed -e '$d' | sed -e 's/,\s//'| sed -e 's/.*\s//'`)
+# join attribute table of the soil mapping unit (SMU)
+newColNames=(`sqlite3 ${GIS_DB_FILE} '.schema HWSD_SMU' | sed -e '1,2d' | sed -e '$d' | sed -e 's/^\s*//' | sed -e 's/\s.*//' | sed -e 's/\`//g'`)
+newColTypes=(`sqlite3 ${GIS_DB_FILE} '.schema HWSD_SMU' | sed -e '1,2d' | sed -e '$d' | sed -e 's/,\s//' | sed -e 's/.*\s\s//' | sed -e 's/\s//g'`)
 NnewCols=${#newColNames[*]}
 
 cat /dev/null > ${TMP_DIR}/join.sql
 for ((i=0; i < $NnewCols; i += 1)); do
-    echo "ALTER TABLE ${vectBasemap} ADD ${newColNames[$i]} ${newColTypes[$i]};"  >> ${TMP_DIR}/join.sql
-    echo "UPDATE ${vectBasemap} SET ${newColNames[$i]}=(SELECT ${newColNames[$i]} FROM HWSD_SMU WHERE HWSD_SMU.MU_GLOBAL=${vectBasemap}.value);" >>  ${TMP_DIR}/join.sql
+  echo "ALTER TABLE ${vectBasemap} ADD ${newColNames[$i]} ${newColTypes[$i]};"  >> ${TMP_DIR}/join.sql
+  echo "UPDATE ${vectBasemap} SET ${newColNames[$i]}=(SELECT ${newColNames[$i]} FROM HWSD_SMU WHERE HWSD_SMU.MU_GLOBAL=${vectBasemap}.value);" >>  ${TMP_DIR}/join.sql
 done
-sqlite3 -echo ${GISDB} < ${TMP_DIR}/join.sql
+sqlite3 -echo ${GIS_DB_FILE} < ${TMP_DIR}/join.sql
 
 rm -fr ${TMP_DIR}
